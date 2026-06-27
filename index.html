@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Websocket Test</title>
+    <style>
+        /* Basic dark-theme styling for the whole page.
+           sans-serif keeps text readable without loading external fonts. */
+        body {
+            font-family: sans-serif;
+            padding: 20px;
+            background-color: #121212; /* near-black background, easier on the eyes */
+            color: #ffffff;             /* white text for contrast against dark bg */
+        }
+
+        /* The <pre> element used as a scrolling log console.
+           overflow-y: scroll forces a vertical scrollbar so old logs
+           don't push the layout around as new lines get appended. */
+        #logs {
+            background-color: #000;
+            padding: 10px;
+            height: 300px;
+            overflow-y: scroll;
+            border: 1px solid #333;
+        }
+
+        /* Two visual states for the connection status text.
+           We toggle the element's className in JS to switch between these. */
+        .status-off {
+            color: red;   /* disconnected / connecting */
+        }
+
+        .status-on {
+            color: green; /* connected */
+        }
+    </style>
+</head>
+<body>
+    <h1>Websocket Broadcast Console</h1>
+
+    <!-- This <p> shows the live connection state.
+         It starts as "Connecting..." with the red "status-off" class,
+         and JS will flip both the text and the class once we know
+         whether the socket opened successfully. -->
+    <p id="status" class="status-off">Connecting...</p>
+
+    <!-- A normal HTML form. We intercept its submit event in JS so that
+         clicking "Send" (or pressing Enter) doesn't reload the page —
+         instead it sends the input's value over the WebSocket. -->
+    <form id="message-form">
+        <input type="text" id="message-input" placeholder="Enter a message..." required/>
+        <button type="submit">Send</button>
+    </form>
+
+    <h3>Live Stream Logs:</h3>
+    <!-- <pre> preserves whitespace and line breaks exactly as written,
+         which is why we can just keep appending "\n"-terminated strings
+         to it and have each log entry land on its own line. -->
+    <pre id="logs"></pre>
+</body>
+
+<script>
+    // ---------------------------------------------------------------
+    // 1. Grab references to the DOM elements we'll need repeatedly.
+    //    Doing this once up front (instead of calling
+    //    document.getElementById every time) is both more efficient
+    //    and keeps the rest of the code more readable.
+    // ---------------------------------------------------------------
+    const statusEl = document.getElementById('status'); // connection status <p>
+    const log = document.getElementById('logs');         // the <pre> log console
+    const input = document.getElementById('message-input'); // text input field
+
+    // ---------------------------------------------------------------
+    // 2. Helper function: appendLog
+    //    Centralizes the "write a line to the log box" logic so every
+    //    event handler below can call one simple function instead of
+    //    repeating the same formatting/scrolling code each time.
+    //
+    //    label   - a short tag like "[System]", "[Server]", "[SENT]"
+    //    message - the actual text content to display
+    // ---------------------------------------------------------------
+    const appendLog = (label, message) => {
+        // toLocaleTimeString() gives a human-readable time (e.g. "3:42:10 PM")
+        // based on the user's local timezone/locale settings.
+        const timestamp = new Date().toLocaleTimeString();
+
+        // We use += rather than reassigning textContent from scratch so the
+        // existing log history is preserved and the new line is appended.
+        log.textContent += `[${timestamp}] ${label}: ${message}\n`;
+
+        // scrollTop = scrollHeight pins the scrollbar to the very bottom,
+        // so the newest entry is always visible without manual scrolling.
+        log.scrollTop = log.scrollHeight;
+    }
+
+    // ---------------------------------------------------------------
+    // 3. Open the WebSocket connection.
+    //    "ws://" is the unencrypted WebSocket protocol (the WS
+    //    equivalent of "http://"). For production over HTTPS you'd
+    //    normally use "wss://" (the encrypted equivalent of "https://").
+    //
+    //    Creating the WebSocket object immediately starts the
+    //    connection handshake in the background — it does not block.
+    // ---------------------------------------------------------------
+    const ws = new WebSocket('ws://localhost:8080');
+
+    // ---------------------------------------------------------------
+    // 4. 'open' event — fires once when the handshake succeeds and the
+    //    connection is fully established. This is the earliest point
+    //    at which ws.send() is safe to call.
+    // ---------------------------------------------------------------
+    ws.addEventListener('open', () => {
+        statusEl.textContent = 'Connected';
+        statusEl.className = 'status-on'; // swaps red text for green
+        appendLog('[System]', 'Connected to the server.');
+    });
+
+    // ---------------------------------------------------------------
+    // 5. 'close' event — fires when the connection ends, whether
+    //    because the server closed it, the network dropped, or the
+    //    client called ws.close(). There's no automatic reconnect
+    //    logic here, so once this fires the socket is done for good
+    //    unless the page is reloaded.
+    // ---------------------------------------------------------------
+    ws.addEventListener('close', () => {
+        statusEl.textContent = 'Disconnected';
+        statusEl.className = 'status-off'; // back to red
+        appendLog('[System]', 'Disconnected from the server.');
+    });
+
+    // ---------------------------------------------------------------
+    // 6. 'message' event — fires every time the server pushes data to
+    //    this client. event.data contains the payload (a string here,
+    //    though WebSockets can also carry binary data as Blob/ArrayBuffer).
+    //    This is what makes it a "broadcast console": any message the
+    //    server sends out gets logged here in real time.
+    // ---------------------------------------------------------------
+    ws.addEventListener('message', (event) => {
+        appendLog('[Server]', event.data);
+    });
+
+    // ---------------------------------------------------------------
+    // 7. Form submission — this is how the user sends a message OUT
+    //    to the server.
+    // ---------------------------------------------------------------
+    document.getElementById('message-form').addEventListener('submit', (e) => {
+        // e.preventDefault() stops the browser's default form behavior,
+        // which would otherwise be a full page reload/navigation.
+        e.preventDefault();
+
+        // Guard clause: WebSocket.readyState tells us the connection's
+        // current phase. The possible values are:
+        //   0 = CONNECTING (handshake in progress)
+        //   1 = OPEN       (ready to send/receive)
+        //   2 = CLOSING
+        //   3 = CLOSED
+        // Calling .send() while not OPEN throws an error, so we check
+        // first and bail out gracefully with a logged error instead.
+        if (ws.readyState !== WebSocket.OPEN) {
+            appendLog('[Error]', 'Cannot send message. WebSocket is not open.');
+            return;
+        }
+
+        // .trim() removes leading/trailing whitespace so an accidental
+        // space-only submission doesn't get sent as "real" content.
+        const msg = input.value.trim();
+
+        // Push the message out over the open connection. The server
+        // (in a typical broadcast setup) would then relay this to all
+        // connected clients, which is why you'd expect to see your own
+        // message echoed back via the 'message' listener above too.
+        ws.send(msg);
+
+        // Log locally that *we* sent it, separately from whatever the
+        // server might echo back, so the log clearly distinguishes
+        // outgoing vs incoming traffic.
+        appendLog('[SENT]', msg);
+
+        // Clear the input field so the user can immediately type the
+        // next message without manually deleting the old one.
+        input.value = '';
+    })
+</script>
+</html>
